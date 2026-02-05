@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Dict, Any
 
 @dataclass
 class TrainingConfig:
@@ -11,7 +10,7 @@ class TrainingConfig:
     K: int = 8
     micro_batch_size: int = 1
     grad_accum_steps: int = 1
-    max_gen_len: int = 128
+    max_gen_len: int = 2048
 
     @classmethod
     def from_json(cls, path: str | Path) -> "TrainingConfig":
