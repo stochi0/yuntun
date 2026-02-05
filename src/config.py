@@ -1,46 +1,26 @@
-
 from dataclasses import dataclass
-import torch
-from typing import Optional
+import json
+from pathlib import Path
+from typing import Dict, Any
 
-@dataclass(slots=True)
-class Qwen3ModelConfig:
-    vocab_size: int = 151_936
-    max_position_embeddings: int = 40_960
-    hidden_size: int = 1024
-    intermediate_size: int = 3072
-    num_hidden_layers: int = 28
-    num_attention_heads: int = 16
-    num_key_value_heads: int = 8
-    qk_norm: bool = True
-    rope_theta: float = 1_000_000.0
-    use_bf16: bool = True
-    
-    # Runtime settings merged
-    device: Optional[str] = None
-    dtype: Optional[torch.dtype] = None
+@dataclass
+class TrainingConfig:
+    tp_size: int = 1
+    pp_size: int = 1
+    dp_size: int = 1
+    K: int = 8
+    micro_batch_size: int = 1
+    grad_accum_steps: int = 1
+    max_gen_len: int = 128
 
-    def __post_init__(self):
-        if self.device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        if self.dtype is None:
-            if self.use_bf16 and self.device == "cuda":
-                bf16_ok = getattr(torch.cuda, "is_bf16_supported", lambda: False)()
-                if not bf16_ok:
-                    try:
-                        torch.tensor([1.0], dtype=torch.bfloat16, device=self.device)
-                        bf16_ok = True
-                    except Exception:
-                        bf16_ok = False
-                self.dtype = torch.bfloat16 if bf16_ok else torch.float32
-            else:
-                self.dtype = torch.float32
+    @classmethod
+    def from_json(cls, path: str | Path) -> "TrainingConfig":
+        with open(path, "r") as f:
+            data = json.load(f)
+        # Only keep keys that are fields in the dataclass
+        valid_keys = cls.__annotations__.keys()
+        filtered_data = {k: v for k, v in data.items() if k in valid_keys}
+        return cls(**filtered_data)
 
-    @property
-    def head_dim(self) -> int:
-        if self.hidden_size % self.num_attention_heads != 0:
-            raise ValueError(
-                "hidden_size must be divisible by num_attention_heads"
-            )
-        return self.hidden_size // self.num_attention_heads
+def load_config(config_path: str) -> TrainingConfig:
+    return TrainingConfig.from_json(config_path)

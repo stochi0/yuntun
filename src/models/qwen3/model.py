@@ -1,9 +1,8 @@
-# qwen3.py
 import torch
 import torch.nn.functional as F
 from torch import nn
 from typing import Optional, List, Dict, Tuple
-from config import Qwen3ModelConfig
+from .config import Qwen3ModelConfig
 
 # ---- low-level utilities (torch-only, device-aware) ----
 def compute_rope_params(
