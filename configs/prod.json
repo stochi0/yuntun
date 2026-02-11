@@ -1,9 +1,0 @@
-{
-  "tp_size": 2,
-  "pp_size": 2,
-  "dp_size": 2,
-  "K": 8,
-  "micro_batch_size": 2,
-  "grad_accum_steps": 8,
-  "max_gen_len": 256
-}
