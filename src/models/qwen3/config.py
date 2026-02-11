@@ -14,7 +14,10 @@ class Qwen3ModelConfig:
     qk_norm: bool = True
     rope_theta: float = 1_000_000.0
     use_bf16: bool = True
-    
+
+    # Tensor parallelism
+    tp_size: int = 1
+
     # Runtime settings merged
     device: Optional[str] = None
     dtype: Optional[torch.dtype] = None
@@ -43,3 +46,25 @@ class Qwen3ModelConfig:
                 "hidden_size must be divisible by num_attention_heads"
             )
         return self.hidden_size // self.num_attention_heads
+
+    def validate_tensor_parallel(self, tp_size: Optional[int] = None) -> None:
+        """Check model dims are divisible by tp_size for Megatron-style TP."""
+        size = tp_size if tp_size is not None else self.tp_size
+        if size <= 1:
+            return
+        if self.num_attention_heads % size != 0:
+            raise ValueError(
+                f"num_attention_heads ({self.num_attention_heads}) must be divisible by tp_size ({size})"
+            )
+        if self.num_key_value_heads % size != 0:
+            raise ValueError(
+                f"num_key_value_heads ({self.num_key_value_heads}) must be divisible by tp_size ({size})"
+            )
+        if self.intermediate_size % size != 0:
+            raise ValueError(
+                f"intermediate_size ({self.intermediate_size}) must be divisible by tp_size ({size})"
+            )
+        if self.vocab_size % size != 0:
+            raise ValueError(
+                f"vocab_size ({self.vocab_size}) must be divisible by tp_size ({size})"
+            )

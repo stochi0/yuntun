@@ -2,7 +2,33 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from typing import Optional, List, Dict, Tuple
+
 from .config import Qwen3ModelConfig
+
+def _get_tp_modules():
+    for mod in (
+        "yuntun.distributed.tensor_parallel",
+        "distributed.tensor_parallel",
+    ):
+        try:
+            tp = __import__(mod, fromlist=[
+                "ColumnParallelLinear", "RowParallelLinear",
+                "VocabParallelEmbedding", "ParallelLMHead", "shard_weight_along_dim",
+            ])
+            return (
+                True,
+                tp.ColumnParallelLinear,
+                tp.RowParallelLinear,
+                tp.VocabParallelEmbedding,
+                tp.ParallelLMHead,
+                tp.shard_weight_along_dim,
+            )
+        except ImportError:
+            continue
+    return False, None, None, None, None, None
+
+
+_TP_AVAILABLE, ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding, ParallelLMHead, shard_weight_along_dim = _get_tp_modules()
 
 # ---- low-level utilities (torch-only, device-aware) ----
 def compute_rope_params(
@@ -77,19 +103,32 @@ def apply_qk_rms(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
 
 # ---- single transformer layer with grouped-kv attention (module-based implementation) ----
 class Qwen3Block(nn.Module):
-    def __init__(self, cfg: Qwen3ModelConfig):
+    def __init__(self, cfg: Qwen3ModelConfig, tp_group=None):
         super().__init__()
         emb = cfg.hidden_size
         hd = cfg.head_dim
         n_heads = cfg.num_attention_heads
         n_kv_groups = cfg.num_key_value_heads
         hidden = cfg.intermediate_size
+        self._tp_group = tp_group
+        use_tp = tp_group is not None and tp_group.size() > 1 and _TP_AVAILABLE
 
-        # Linear modules (bias=False matches many exported weights)
-        self.q_proj = nn.Linear(emb, n_heads * hd, bias=False)
-        self.k_proj = nn.Linear(emb, n_kv_groups * hd, bias=False)
-        self.v_proj = nn.Linear(emb, n_kv_groups * hd, bias=False)
-        self.out_proj = nn.Linear(n_heads * hd, emb, bias=False)
+        if use_tp:
+            self.q_proj = ColumnParallelLinear(emb, n_heads * hd, bias=False, gather_output=False, tp_group=tp_group)
+            self.k_proj = ColumnParallelLinear(emb, n_kv_groups * hd, bias=False, gather_output=False, tp_group=tp_group)
+            self.v_proj = ColumnParallelLinear(emb, n_kv_groups * hd, bias=False, gather_output=False, tp_group=tp_group)
+            self.out_proj = RowParallelLinear(n_heads * hd, emb, bias=False, tp_group=tp_group)
+            self.ff_gate = ColumnParallelLinear(emb, hidden, bias=False, gather_output=False, tp_group=tp_group)
+            self.ff_up = ColumnParallelLinear(emb, hidden, bias=False, gather_output=False, tp_group=tp_group)
+            self.ff_down = RowParallelLinear(hidden, emb, bias=False, tp_group=tp_group)
+        else:
+            self.q_proj = nn.Linear(emb, n_heads * hd, bias=False)
+            self.k_proj = nn.Linear(emb, n_kv_groups * hd, bias=False)
+            self.v_proj = nn.Linear(emb, n_kv_groups * hd, bias=False)
+            self.out_proj = nn.Linear(n_heads * hd, emb, bias=False)
+            self.ff_gate = nn.Linear(emb, hidden, bias=False)
+            self.ff_up = nn.Linear(emb, hidden, bias=False)
+            self.ff_down = nn.Linear(hidden, emb, bias=False)
 
         # optional q/k RMSNorm scales (per head-dim)
         if cfg.qk_norm:
@@ -102,16 +141,12 @@ class Qwen3Block(nn.Module):
             self.k_norm_scale = None
             self._has_qk_norm = False
 
-        # feedforward as linear layers (GELU/SILU gating done in forward)
-        self.ff_gate = nn.Linear(emb, hidden, bias=False)
-        self.ff_up = nn.Linear(emb, hidden, bias=False)
-        self.ff_down = nn.Linear(hidden, emb, bias=False)
-
         # layer norm scales: keep float32 for numerical stability, convert when applying
         self.norm1_scale = nn.Parameter(torch.ones((emb,), dtype=torch.float32), requires_grad=False)
         self.norm2_scale = nn.Parameter(torch.ones((emb,), dtype=torch.float32), requires_grad=False)
 
         self._cfg = cfg
+        self._use_tp = use_tp
 
     def set_weights(self, weights: Dict[str, torch.Tensor]):
         """
@@ -122,18 +157,25 @@ class Qwen3Block(nn.Module):
           - norm1, norm2
         Each tensor is expected in the same layout as PyTorch Linear.weight (out_features, in_features).
         If your weights are transposed (in_features, out_features), pass them transposed already or supply .T
+        With TP, full weights are sharded automatically.
         """
-        def assign_linear(linear: nn.Linear, tensor: torch.Tensor):
-            linear.weight.data.copy_(tensor.to(dtype=linear.weight.dtype, device=linear.weight.device))
+        def assign_linear(linear: nn.Module, tensor: torch.Tensor, shard_dim: Optional[int] = None):
+            w = tensor.to(dtype=linear.weight.dtype, device=linear.weight.device)
+            if shard_dim is not None and _TP_AVAILABLE and self._tp_group and self._tp_group.size() > 1:
+                rank, world_size = self._tp_group.rank(), self._tp_group.size()
+                w = shard_weight_along_dim(w, dim=shard_dim, rank=rank, world_size=world_size)
+            linear.weight.data.copy_(w)
 
+        # Column parallel: shard along output (dim 0)
         if "q_proj" in weights:
-            assign_linear(self.q_proj, weights["q_proj"])
+            assign_linear(self.q_proj, weights["q_proj"], shard_dim=0 if self._use_tp else None)
         if "k_proj" in weights:
-            assign_linear(self.k_proj, weights["k_proj"])
+            assign_linear(self.k_proj, weights["k_proj"], shard_dim=0 if self._use_tp else None)
         if "v_proj" in weights:
-            assign_linear(self.v_proj, weights["v_proj"])
+            assign_linear(self.v_proj, weights["v_proj"], shard_dim=0 if self._use_tp else None)
+        # Row parallel: shard along input (dim 1)
         if "out_proj" in weights:
-            assign_linear(self.out_proj, weights["out_proj"])
+            assign_linear(self.out_proj, weights["out_proj"], shard_dim=1 if self._use_tp else None)
 
         if self._has_qk_norm:
             if "q_norm" in weights:
@@ -142,11 +184,11 @@ class Qwen3Block(nn.Module):
                 self.k_norm_scale.data.copy_(weights["k_norm"].to(self.k_norm_scale.dtype, device=self.k_norm_scale.device))
 
         if "gate_proj" in weights:
-            assign_linear(self.ff_gate, weights["gate_proj"])
+            assign_linear(self.ff_gate, weights["gate_proj"], shard_dim=0 if self._use_tp else None)
         if "up_proj" in weights:
-            assign_linear(self.ff_up, weights["up_proj"])
+            assign_linear(self.ff_up, weights["up_proj"], shard_dim=0 if self._use_tp else None)
         if "down_proj" in weights:
-            assign_linear(self.ff_down, weights["down_proj"])
+            assign_linear(self.ff_down, weights["down_proj"], shard_dim=1 if self._use_tp else None)
 
         if "norm1" in weights:
             self.norm1_scale.data.copy_(weights["norm1"].to(self.norm1_scale.dtype, device=self.norm1_scale.device))
@@ -164,8 +206,8 @@ class Qwen3Block(nn.Module):
         """
         x: (batch, seq, emb)
         cos/sin: (context_len, head_dim) float32 buffers
-        kv_cache_layer: {"keys": (batch, n_kv_groups, seq_kv, head_dim),
-                        "values": (batch, n_kv_groups, seq_kv, head_dim)}
+        kv_cache_layer: {"keys": (batch, n_kv_groups_local, seq_kv, head_dim),
+                        "values": (batch, n_kv_groups_local, seq_kv, head_dim)}
         returns (out: batch, seq, emb), new_kv_cache_layer
         """
         b, seq, emb = x.shape
@@ -173,16 +215,19 @@ class Qwen3Block(nn.Module):
         hd = cfg.head_dim
         n_heads = cfg.num_attention_heads
         n_kv_groups = cfg.num_key_value_heads
-        group_size = n_heads // n_kv_groups
+        tp_size = self._tp_group.size() if (self._tp_group and self._tp_group.size() > 1) else 1
+        n_heads_local = n_heads // tp_size
+        n_kv_groups_local = n_kv_groups // tp_size
+        group_size = n_heads_local // n_kv_groups_local  # same as n_heads // n_kv_groups
         scale = hd ** 0.5
 
         # --- attention block ---
         x_norm = rmsnorm(x, self.norm1_scale)  # (b, seq, emb)
 
-        # linear projections using nn.Linear
-        q = self.q_proj(x_norm).view(b, seq, n_heads, hd).permute(0, 2, 1, 3)  # (b, n_heads, seq, hd)
-        k = self.k_proj(x_norm).view(b, seq, n_kv_groups, hd).permute(0, 2, 1, 3)  # (b, n_kv_groups, seq, hd)
-        v = self.v_proj(x_norm).view(b, seq, n_kv_groups, hd).permute(0, 2, 1, 3)
+        # linear projections (output is local with TP)
+        q = self.q_proj(x_norm).view(b, seq, n_heads_local, hd).permute(0, 2, 1, 3)  # (b, n_heads_local, seq, hd)
+        k = self.k_proj(x_norm).view(b, seq, n_kv_groups_local, hd).permute(0, 2, 1, 3)  # (b, n_kv_groups_local, seq, hd)
+        v = self.v_proj(x_norm).view(b, seq, n_kv_groups_local, hd).permute(0, 2, 1, 3)
 
         if self._has_qk_norm:
             q = apply_qk_rms(q, self.q_norm_scale)
@@ -213,8 +258,8 @@ class Qwen3Block(nn.Module):
 
         attn_weights = torch.softmax(attn_scores, dim=-1)
         context = torch.einsum("bnqk,bnkh->bnqh", attn_weights, v_exp)
-        context = context.permute(0, 2, 1, 3).contiguous().view(b, seq, n_heads * hd)
-        attn_out = self.out_proj(context)  # (b, seq, emb)
+        context = context.permute(0, 2, 1, 3).contiguous().view(b, seq, n_heads_local * hd)
+        attn_out = self.out_proj(context)  # (b, seq, emb) - all-reduced with TP
 
         x = x + attn_out  # residual
 
@@ -231,26 +276,30 @@ class Qwen3Block(nn.Module):
 
 # ---- full model built from per-layer modules ----
 class Qwen3Model(nn.Module):
-    def __init__(self, cfg: Qwen3ModelConfig):
+    def __init__(self, cfg: Qwen3ModelConfig, tp_group=None):
         super().__init__()
         self.cfg = cfg
-        
-        # Ensure runtime setup
-        if cfg.device is None or cfg.dtype is None:
-             # This should be handled by post_init but if manually constructed without it (e.g. from dict),
-             # or if user didn't trigger post_init behavior (dataclass handles it though).
-             pass
+        self._tp_group = tp_group
+        use_tp = tp_group is not None and tp_group.size() > 1 and _TP_AVAILABLE
+        self._use_tp = use_tp
 
-        # Embedding / head implemented with modules for easier weight management
-        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
+        if use_tp:
+            cfg.validate_tensor_parallel(tp_size=tp_group.size())
+
+        # Embedding / head
+        if use_tp:
+            self.tok_emb = VocabParallelEmbedding(cfg.vocab_size, cfg.hidden_size, tp_group=tp_group)
+            self.out_head = ParallelLMHead(cfg.hidden_size, cfg.vocab_size, bias=False, tp_group=tp_group)
+        else:
+            self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
+            self.out_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
         self.tok_emb.weight.requires_grad = False
+        self.out_head.weight.requires_grad = False
 
-        self.trf_blocks = nn.ModuleList([Qwen3Block(cfg) for _ in range(cfg.num_hidden_layers)])
+        self.trf_blocks = nn.ModuleList([Qwen3Block(cfg, tp_group=tp_group) for _ in range(cfg.num_hidden_layers)])
 
         # final norm scale (RMSNorm style)
         self.final_norm_scale = nn.Parameter(torch.ones((cfg.hidden_size,), dtype=torch.float32), requires_grad=False)
-        self.out_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
-        self.out_head.weight.requires_grad = False
 
         # precompute RoPE on device (float32 buffers)
         cos, sin = compute_rope_params(
@@ -282,12 +331,27 @@ class Qwen3Model(nn.Module):
     def set_global_weights(self, weights: Dict[str, torch.Tensor]):
         """
         Load global weights. Expected keys: 'tok_emb', 'out_head', 'final_norm'
-        Each tensor should have PyTorch layout expected by the module (e.g. out_features, in_features for Linear).
+        Each tensor should have PyTorch layout: tok_emb (vocab, hidden), out_head (vocab, hidden).
+        With TP, full weights are sharded automatically.
         """
+        def _copy_emb(w: torch.Tensor):
+            t = w.to(dtype=self.tok_emb.weight.dtype, device=self.tok_emb.weight.device)
+            if self._use_tp and _TP_AVAILABLE:
+                rank, world_size = self._tp_group.rank(), self._tp_group.size()
+                t = shard_weight_along_dim(t, dim=0, rank=rank, world_size=world_size)
+            self.tok_emb.weight.data.copy_(t)
+
+        def _copy_head(w: torch.Tensor):
+            t = w.to(dtype=self.out_head.weight.dtype, device=self.out_head.weight.device)
+            if self._use_tp and _TP_AVAILABLE:
+                rank, world_size = self._tp_group.rank(), self._tp_group.size()
+                t = shard_weight_along_dim(t, dim=0, rank=rank, world_size=world_size)
+            self.out_head.weight.data.copy_(t)
+
         if "tok_emb" in weights:
-            self.tok_emb.weight.data.copy_(weights["tok_emb"].to(dtype=self.tok_emb.weight.dtype, device=self.tok_emb.weight.device))
+            _copy_emb(weights["tok_emb"])
         if "out_head" in weights:
-            self.out_head.weight.data.copy_(weights["out_head"].to(dtype=self.out_head.weight.dtype, device=self.out_head.weight.device))
+            _copy_head(weights["out_head"])
         if "final_norm" in weights:
             self.final_norm_scale.data.copy_(weights["final_norm"].to(dtype=self.final_norm_scale.dtype, device=self.final_norm_scale.device))
 
