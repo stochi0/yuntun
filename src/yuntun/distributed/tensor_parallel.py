@@ -14,46 +14,48 @@ import torch.distributed as dist
 from torch import nn
 
 # ---------------------------------------------------------------------------
-# Mappings (communication primitives)
+# Communication primitives
 # ---------------------------------------------------------------------------
 
 
-def reduce_from_tensor_model_parallel_region(
-    input_: torch.Tensor,
+def tp_all_reduce(
+    tensor: torch.Tensor,
     group: Optional[dist.ProcessGroup] = None,
 ) -> torch.Tensor:
-    """All-reduce across TP group. Forward: reduce. Backward: copy."""
+    """All-reduce across tensor parallel group (sums sharded tensors)."""
     if group is None or group.size() == 1:
-        return input_
-    dist.all_reduce(input_.contiguous(), group=group)
-    return input_
+        return tensor
+    work = dist.all_reduce(tensor.contiguous(), group=group, async_op=True)
+    work.wait()
+    return tensor
 
 
-def gather_from_tensor_model_parallel_region(
-    input_: torch.Tensor,
+def tp_all_gather(
+    tensor: torch.Tensor,
     dim: int = -1,
     group: Optional[dist.ProcessGroup] = None,
 ) -> torch.Tensor:
-    """All-gather along the given dimension."""
+    """All-gather sharded tensors along dim into full tensor on each rank."""
     if group is None or group.size() == 1:
-        return input_
+        return tensor
     world_size = group.size()
-    tensor_list = [torch.empty_like(input_) for _ in range(world_size)]
-    dist.all_gather(tensor_list, input_.contiguous(), group=group)
+    tensor_list = [torch.empty_like(tensor) for _ in range(world_size)]
+    work = dist.all_gather(tensor_list, tensor.contiguous(), group=group, async_op=True)
+    work.wait()
     return torch.cat(tensor_list, dim=dim)
 
 
 # ---------------------------------------------------------------------------
-# VocabUtility
+# Vocab partitioning
 # ---------------------------------------------------------------------------
 
 
-def vocab_range_from_global_vocab_size(
+def get_vocab_partition_range(
     vocab_size: int,
     rank: int,
     world_size: int,
 ) -> tuple[int, int]:
-    """Return (start, end) index for this rank's vocab partition."""
+    """Return (start, end) indices for this rank's vocabulary shard."""
     per_rank = vocab_size // world_size
     return rank * per_rank, (rank + 1) * per_rank
 
@@ -133,18 +135,30 @@ class ColumnParallelLinear(nn.Module):
         assert out_features % tp_size == 0
         self.output_size_per_partition = out_features // tp_size
 
-        device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
-        self.weight = nn.Parameter(torch.empty(self.output_size_per_partition, in_features, device=device))
-        self.bias = nn.Parameter(torch.empty(self.output_size_per_partition, device=device)) if bias else None
+        device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if torch.cuda.is_available()
+            else torch.device("cpu")
+        )
+        self.weight = nn.Parameter(
+            torch.empty(self.output_size_per_partition, in_features, device=device)
+        )
+        self.bias = (
+            nn.Parameter(torch.empty(self.output_size_per_partition, device=device))
+            if bias
+            else None
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.tp_group and self.tp_group.size() > 1:
-            out = _ColumnParallelLinearForward.apply(x, self.weight, self.bias, self.tp_group)
+            out = _ColumnParallelLinearForward.apply(
+                x, self.weight, self.bias, self.tp_group
+            )
         else:
             out = torch.nn.functional.linear(x, self.weight, self.bias)
 
         if self.gather_output and self.tp_group and self.tp_group.size() > 1:
-            out = gather_from_tensor_model_parallel_region(out, dim=-1, group=self.tp_group)
+            out = tp_all_gather(out, dim=-1, group=self.tp_group)
         return out
 
 
@@ -162,7 +176,8 @@ class _RowParallelLinearForward(torch.autograd.Function):
         ctx.use_bias = bias is not None
         output = torch.nn.functional.linear(input_, weight, bias)
         if group is not None and group.size() > 1:
-            dist.all_reduce(output, group=group)
+            work = dist.all_reduce(output, group=group, async_op=True)
+            work.wait()
         return output
 
     @staticmethod
@@ -218,13 +233,23 @@ class RowParallelLinear(nn.Module):
         assert in_features % tp_size == 0
         self.input_size_per_partition = in_features // tp_size
 
-        device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
-        self.weight = nn.Parameter(torch.empty(out_features, self.input_size_per_partition, device=device))
-        self.bias = nn.Parameter(torch.empty(out_features, device=device)) if bias else None
+        device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if torch.cuda.is_available()
+            else torch.device("cpu")
+        )
+        self.weight = nn.Parameter(
+            torch.empty(out_features, self.input_size_per_partition, device=device)
+        )
+        self.bias = (
+            nn.Parameter(torch.empty(out_features, device=device)) if bias else None
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.tp_group and self.tp_group.size() > 1:
-            return _RowParallelLinearForward.apply(x, self.weight, self.bias, self.tp_group)
+            return _RowParallelLinearForward.apply(
+                x, self.weight, self.bias, self.tp_group
+            )
         return torch.nn.functional.linear(x, self.weight, self.bias)
 
 
@@ -255,17 +280,27 @@ class VocabParallelEmbedding(nn.Module):
         rank = tp_group.rank() if tp_group else 0
         assert num_embeddings % tp_size == 0
 
-        self.vocab_start_index, self.vocab_end_index = vocab_range_from_global_vocab_size(
+        self.vocab_start_index, self.vocab_end_index = get_vocab_partition_range(
             num_embeddings, rank, tp_size
         )
-        self.num_embeddings_per_partition = self.vocab_end_index - self.vocab_start_index
+        self.num_embeddings_per_partition = (
+            self.vocab_end_index - self.vocab_start_index
+        )
 
-        device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
-        self.weight = nn.Parameter(torch.empty(self.num_embeddings_per_partition, embedding_dim, device=device))
+        device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if torch.cuda.is_available()
+            else torch.device("cpu")
+        )
+        self.weight = nn.Parameter(
+            torch.empty(self.num_embeddings_per_partition, embedding_dim, device=device)
+        )
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         if self.tp_group and self.tp_group.size() > 1:
-            input_mask = (input_ids < self.vocab_start_index) | (input_ids >= self.vocab_end_index)
+            input_mask = (input_ids < self.vocab_start_index) | (
+                input_ids >= self.vocab_end_index
+            )
             masked_input = input_ids.clone() - self.vocab_start_index
             masked_input[input_mask] = 0
         else:
@@ -275,7 +310,7 @@ class VocabParallelEmbedding(nn.Module):
 
         if self.tp_group and self.tp_group.size() > 1:
             output_parallel = output_parallel.masked_fill(input_mask.unsqueeze(-1), 0.0)
-            output = reduce_from_tensor_model_parallel_region(output_parallel, self.tp_group)
+            output = tp_all_reduce(output_parallel, self.tp_group)
         else:
             output = output_parallel
 
@@ -306,14 +341,24 @@ class ParallelLMHead(nn.Module):
         assert vocab_size % tp_size == 0
         self.vocab_size_per_partition = vocab_size // tp_size
 
-        device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
-        self.weight = nn.Parameter(torch.empty(self.vocab_size_per_partition, hidden_size, device=device))
-        self.bias = nn.Parameter(torch.empty(self.vocab_size_per_partition, device=device)) if bias else None
+        device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if torch.cuda.is_available()
+            else torch.device("cpu")
+        )
+        self.weight = nn.Parameter(
+            torch.empty(self.vocab_size_per_partition, hidden_size, device=device)
+        )
+        self.bias = (
+            nn.Parameter(torch.empty(self.vocab_size_per_partition, device=device))
+            if bias
+            else None
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         logits = torch.nn.functional.linear(x, self.weight, self.bias)
         if self.tp_group and self.tp_group.size() > 1:
-            logits = gather_from_tensor_model_parallel_region(logits, dim=-1, group=self.tp_group)
+            logits = tp_all_gather(logits, dim=-1, group=self.tp_group)
         return logits
 
 

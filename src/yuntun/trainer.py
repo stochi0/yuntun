@@ -1,7 +1,6 @@
 """Training loop for Qwen3-style causal LM on FineWeb."""
 
 import json
-import math
 from pathlib import Path
 
 import torch

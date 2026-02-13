@@ -1,6 +1,5 @@
 """FineWeb dataset loading and tokenization for causal LM training."""
 
-from typing import Optional
 import torch
 from torch.utils.data import DataLoader, IterableDataset
 from transformers import AutoTokenizer

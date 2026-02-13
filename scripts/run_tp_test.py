@@ -5,6 +5,7 @@ Uses Gloo backend to simulate multi-GPU on CPU (works on Mac, no CUDA).
 
 Run: torchrun --nproc_per_node=2 scripts/run_tp_test.py
 """
+
 import os
 import sys
 
@@ -42,11 +43,15 @@ def main():
 
     # Forward
     batch, seq = 2, 8
-    input_ids = torch.randint(0, min(1000, cfg.vocab_size), (batch, seq), device=cfg.device)
+    input_ids = torch.randint(
+        0, min(1000, cfg.vocab_size), (batch, seq), device=cfg.device
+    )
     logits, kv_cache = model(input_ids, kv_cache=None)
 
     if rank == 0:
-        print(f"logits.shape: {logits.shape} (expected [{batch}, {seq}, {cfg.vocab_size}])")
+        print(
+            f"logits.shape: {logits.shape} (expected [{batch}, {seq}, {cfg.vocab_size}])"
+        )
         assert logits.shape == (batch, seq, cfg.vocab_size)
         print("TP test passed!")
 

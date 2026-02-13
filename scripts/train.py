@@ -6,6 +6,7 @@ from pathlib import Path
 
 # Add src to path for direct run
 import sys
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.yuntun.trainer import Trainer
