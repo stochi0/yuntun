@@ -5,19 +5,7 @@ from typing import Optional, List
 from .config import Qwen3Config
 from .layers import Qwen3Block, RMSNorm
 from .utils import compute_rope_params
-
-# Attempt tp imports
-try:
-    from ..distributed.tensor_parallel import (
-        VocabParallelEmbedding,
-        ParallelLMHead,
-    )
-
-    TP_AVAILABLE = True
-except ImportError:
-    TP_AVAILABLE = False
-    VocabParallelEmbedding = None
-    ParallelLMHead = None
+from ..distributed.tensor_parallel import VocabParallelEmbedding, ParallelLMHead
 
 
 class Qwen3Model(nn.Module):
@@ -52,10 +40,9 @@ class Qwen3Model(nn.Module):
         self.register_buffer("sin", sin, persistent=False)
 
     def _init_embeddings(self, vocab_size, hidden_size, tp_group):
-        if tp_group is not None and tp_group.size() > 1 and TP_AVAILABLE:
+        if tp_group is not None and tp_group.size() > 1:
             return VocabParallelEmbedding(vocab_size, hidden_size, tp_group=tp_group)
-        else:
-            return nn.Embedding(vocab_size, hidden_size)
+        return nn.Embedding(vocab_size, hidden_size)
 
     def forward(
         self,
@@ -110,7 +97,7 @@ class Qwen3ForCausalLM(nn.Module):
         self.config = config
         self.model = Qwen3Model(config, tp_group=tp_group)
 
-        if tp_group is not None and tp_group.size() > 1 and TP_AVAILABLE:
+        if tp_group is not None and tp_group.size() > 1:
             self.lm_head = ParallelLMHead(
                 config.hidden_size, config.vocab_size, bias=False, tp_group=tp_group
             )

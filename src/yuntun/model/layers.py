@@ -4,16 +4,7 @@ import torch.nn.functional as F
 from typing import Optional, Tuple
 from .config import Qwen3Config
 from .utils import apply_rope_with_offset
-
-# Attempt tp imports
-try:
-    from ..distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
-
-    TP_AVAILABLE = True
-except ImportError:
-    TP_AVAILABLE = False
-    ColumnParallelLinear = None
-    RowParallelLinear = None
+from ..distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
 
 
 class RMSNorm(nn.Module):
@@ -47,7 +38,7 @@ class Qwen3Attention(nn.Module):
         self.num_heads_local = self.num_heads // self.tp_size
         self.num_key_value_heads_local = self.num_key_value_heads // self.tp_size
 
-        if self.tp_size > 1 and TP_AVAILABLE:
+        if self.tp_size > 1:
             self.q_proj = ColumnParallelLinear(
                 self.hidden_size,
                 self.num_heads * self.head_dim,
@@ -157,7 +148,10 @@ class Qwen3Attention(nn.Module):
         attn_output = torch.matmul(attn_weights, v)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+        # With TP, each rank has num_heads_local heads; o_proj expects (batch, seq, num_heads*head_dim) split
+        attn_output = attn_output.view(
+            bsz, q_len, self.num_heads_local * self.head_dim
+        )
 
         attn_output = self.o_proj(attn_output)
 
@@ -173,7 +167,7 @@ class Qwen3MLP(nn.Module):
         if tp_group is not None and tp_group.size() > 1:
             self.tp_size = tp_group.size()
 
-        if self.tp_size > 1 and TP_AVAILABLE:
+        if self.tp_size > 1:
             self.gate_proj = ColumnParallelLinear(
                 self.hidden_size,
                 self.intermediate_size,
