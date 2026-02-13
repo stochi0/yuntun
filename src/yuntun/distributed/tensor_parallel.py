@@ -25,7 +25,8 @@ def tp_all_reduce(
     """All-reduce across tensor parallel group (sums sharded tensors)."""
     if group is None or group.size() == 1:
         return tensor
-    work = dist.all_reduce(tensor.contiguous(), group=group, async_op=True)
+    tensor = tensor.contiguous()
+    work = dist.all_reduce(tensor, group=group, async_op=True)
     work.wait()
     return tensor
 
