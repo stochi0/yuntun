@@ -3,16 +3,8 @@
 Test Megatron-style tensor parallelism with Qwen3.
 Uses Gloo backend to simulate multi-GPU on CPU (works on Mac, no CUDA).
 
-Run: torchrun --nproc_per_node=2 scripts/run_tp_test.py
+Run: uv run python -m torch.distributed.run --nproc_per_node=2 scripts/run_tp_test.py
 """
-
-import os
-import sys
-from pathlib import Path
-
-# Ensure src is on path (package root)
-project_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(project_root / "src"))
 
 import torch
 import torch.distributed as dist

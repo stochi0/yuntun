@@ -49,8 +49,8 @@ class Trainer:
             if not dist.is_initialized():
                 if "RANK" not in os.environ:
                     raise RuntimeError(
-                        "tp_size > 1 requires torchrun. Run: "
-                        "torchrun --nproc_per_node=N scripts/train.py --config <path>"
+                        "tp_size > 1 requires distributed. Run: "
+                        "python -m torch.distributed.run --nproc_per_node=N scripts/train.py --config <path>"
                     )
                 dist.init_process_group(
                     backend="nccl" if torch.cuda.is_available() else "gloo"
@@ -59,7 +59,7 @@ class Trainer:
             if world_size != self.tp_size:
                 raise ValueError(
                     f"tp_size={self.tp_size} must match world_size={world_size}. "
-                    f"Use: torchrun --nproc_per_node={self.tp_size} ..."
+                    f"Use: python -m torch.distributed.run --nproc_per_node={self.tp_size} ..."
                 )
             groups = create_groups(
                 tp_size=self.tp_size, pp_size=self.pp_size, dp_size=self.dp_size
