@@ -28,7 +28,7 @@ class Qwen3Model(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # Initialize RoPE cache
-        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.head_dim = config.head_dim
         cos, sin = compute_rope_params(
             self.head_dim,
             config.rope_theta,

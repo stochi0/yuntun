@@ -27,7 +27,7 @@ class Qwen3Attention(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
         self.tp_group = tp_group
 
@@ -38,25 +38,26 @@ class Qwen3Attention(nn.Module):
         self.num_heads_local = self.num_heads // self.tp_size
         self.num_key_value_heads_local = self.num_key_value_heads // self.tp_size
 
+        use_bias = getattr(config, "attention_bias", False)
         if self.tp_size > 1:
             self.q_proj = ColumnParallelLinear(
                 self.hidden_size,
                 self.num_heads * self.head_dim,
-                bias=True,
+                bias=use_bias,
                 gather_output=False,
                 tp_group=tp_group,
             )
             self.k_proj = ColumnParallelLinear(
                 self.hidden_size,
                 self.num_key_value_heads * self.head_dim,
-                bias=True,
+                bias=use_bias,
                 gather_output=False,
                 tp_group=tp_group,
             )
             self.v_proj = ColumnParallelLinear(
                 self.hidden_size,
                 self.num_key_value_heads * self.head_dim,
-                bias=True,
+                bias=use_bias,
                 gather_output=False,
                 tp_group=tp_group,
             )
@@ -68,13 +69,17 @@ class Qwen3Attention(nn.Module):
             )
         else:
             self.q_proj = nn.Linear(
-                self.hidden_size, self.num_heads * self.head_dim, bias=True
+                self.hidden_size, self.num_heads * self.head_dim, bias=use_bias
             )
             self.k_proj = nn.Linear(
-                self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True
+                self.hidden_size,
+                self.num_key_value_heads * self.head_dim,
+                bias=use_bias,
             )
             self.v_proj = nn.Linear(
-                self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True
+                self.hidden_size,
+                self.num_key_value_heads * self.head_dim,
+                bias=use_bias,
             )
             self.o_proj = nn.Linear(
                 self.num_heads * self.head_dim, self.hidden_size, bias=False
@@ -149,9 +154,7 @@ class Qwen3Attention(nn.Module):
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         # With TP, each rank has num_heads_local heads; o_proj expects (batch, seq, num_heads*head_dim) split
-        attn_output = attn_output.view(
-            bsz, q_len, self.num_heads_local * self.head_dim
-        )
+        attn_output = attn_output.view(bsz, q_len, self.num_heads_local * self.head_dim)
 
         attn_output = self.o_proj(attn_output)
 

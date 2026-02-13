@@ -23,12 +23,19 @@ class Qwen3Config:
 
     # Qwen specific
     qk_norm: bool = True
+    head_dim: Optional[int] = (
+        None  # If set, overrides hidden_size // num_attention_heads
+    )
 
     # Tensor Parallelism
     tp_size: int = 1
 
     def __post_init__(self):
-        self.head_dim = self.hidden_size // self.num_attention_heads
+        self.head_dim = (
+            self.head_dim
+            if self.head_dim is not None
+            else self.hidden_size // self.num_attention_heads
+        )
         if self.num_key_value_heads > self.num_attention_heads:
             raise ValueError(
                 f"num_key_value_heads={self.num_key_value_heads} must be <= num_attention_heads={self.num_attention_heads}"
