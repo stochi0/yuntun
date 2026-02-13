@@ -146,7 +146,14 @@ class Qwen3Attention(nn.Module):
 
         attn_weights = torch.matmul(q, k.transpose(2, 3)) / (self.head_dim**0.5)
 
-        if attention_mask is not None:
+        # Causal mask: position i can only attend to positions 0..i
+        if attention_mask is None:
+            q_len, kv_len = q.size(2), k.size(2)
+            causal_mask = torch.triu(
+                torch.ones(q_len, kv_len, device=q.device, dtype=torch.bool), diagonal=1
+            )
+            attn_weights = attn_weights.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+        else:
             attn_weights = attn_weights + attention_mask
 
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
