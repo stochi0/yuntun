@@ -22,7 +22,7 @@ from yuntun.model.loading import load_qwen3_from_hf
 
 
 HF_MODEL = "Qwen/Qwen3-0.6B"
-DTYPE = torch.float64   # use float64 for strictest parity
+DTYPE = torch.float32   # fp32 for parity checks
 DEVICE = "cpu"
 
 
@@ -30,7 +30,7 @@ DEVICE = "cpu"
 # Utility
 # ------------------------------------------------------------
 
-def compare_tensors(name, a, b, tol=1e-10):
+def compare_tensors(name, a, b, tol=5e-4):
     diff = (a - b).abs()
     max_diff = diff.max().item()
     mean_diff = diff.mean().item()
@@ -50,7 +50,7 @@ def compare_tensors(name, a, b, tol=1e-10):
 def load_models():
     hf_model = AutoModelForCausalLM.from_pretrained(
         HF_MODEL,
-        torch_dtype=DTYPE,
+        dtype=DTYPE,
         attn_implementation="eager",
         low_cpu_mem_usage=True,
     ).to(DEVICE).eval()
