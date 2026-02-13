@@ -12,6 +12,11 @@
   "eval_steps": 500,
   "save_steps": 1000,
   "output_dir": "outputs/fineweb",
+  "parallelism": {
+    "tp_size": 1,
+    "pp_size": 1,
+    "dp_size": 1
+  },
   "model": {
     "vocab_size": 151936,
     "hidden_size": 1024,

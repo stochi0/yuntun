@@ -37,7 +37,10 @@ class Trainer:
         with open(config_path) as f:
             self.cfg = json.load(f)
 
-        self.tp_size = self.cfg.get("tp_size", 1)
+        par = self.cfg.get("parallelism", {})
+        self.tp_size = par.get("tp_size", self.cfg.get("tp_size", 1))
+        self.pp_size = par.get("pp_size", 1)
+        self.dp_size = par.get("dp_size", 1)
         self.tp_group = None
 
         if self.tp_size > 1:
@@ -58,7 +61,9 @@ class Trainer:
                     f"tp_size={self.tp_size} must match world_size={world_size}. "
                     f"Use: torchrun --nproc_per_node={self.tp_size} ..."
                 )
-            groups = create_groups(tp_size=self.tp_size, pp_size=1, dp_size=1)
+            groups = create_groups(
+                tp_size=self.tp_size, pp_size=self.pp_size, dp_size=self.dp_size
+            )
             self.tp_group = groups.tp
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
