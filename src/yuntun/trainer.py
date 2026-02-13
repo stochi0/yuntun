@@ -1,15 +1,18 @@
 """Training loop for Qwen3-style causal LM on FineWeb."""
 
 import json
+import os
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 
 from .model.config import Qwen3Config
 from .model.model import Qwen3ForCausalLM
 from .data.fineweb import FineWebDataModule
+from .distributed.parallel import create_groups
 
 
 def get_linear_schedule_with_warmup(optimizer, warmup_steps, total_steps):
@@ -34,9 +37,38 @@ class Trainer:
         with open(config_path) as f:
             self.cfg = json.load(f)
 
+        self.tp_size = self.cfg.get("tp_size", 1)
+        self.tp_group = None
+
+        if self.tp_size > 1:
+            if not dist.is_available():
+                raise RuntimeError("Tensor parallelism requires torch.distributed")
+            if not dist.is_initialized():
+                if "RANK" not in os.environ:
+                    raise RuntimeError(
+                        "tp_size > 1 requires torchrun. Run: "
+                        "torchrun --nproc_per_node=N scripts/train.py --config <path>"
+                    )
+                dist.init_process_group(
+                    backend="nccl" if torch.cuda.is_available() else "gloo"
+                )
+            world_size = dist.get_world_size()
+            if world_size != self.tp_size:
+                raise ValueError(
+                    f"tp_size={self.tp_size} must match world_size={world_size}. "
+                    f"Use: torchrun --nproc_per_node={self.tp_size} ..."
+                )
+            groups = create_groups(tp_size=self.tp_size, pp_size=1, dp_size=1)
+            self.tp_group = groups.tp
+
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        if self.tp_size > 1 and torch.cuda.is_available():
+            rank = dist.get_rank()
+            self.device = f"cuda:{rank}"
+
         self.output_dir = Path(self.cfg["output_dir"])
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Build model config
         model_cfg = self.cfg.get("model", {})
@@ -50,7 +82,9 @@ class Trainer:
             max_position_embeddings=model_cfg.get("max_position_embeddings", 40960),
         )
 
-        self.model = Qwen3ForCausalLM(self.model_config).to(self.device)
+        self.model = Qwen3ForCausalLM(self.model_config, tp_group=self.tp_group).to(
+            self.device
+        )
         self.data_module = FineWebDataModule(
             tokenizer_name=self.cfg.get("tokenizer", "Qwen/Qwen3-0.6B"),
             max_length=self.cfg.get("max_seq_length", 512),
@@ -141,6 +175,10 @@ class Trainer:
         """Save model and optimizer state."""
         ckpt_path = self.output_dir / f"checkpoint-{self.global_step}"
         ckpt_path.mkdir(parents=True, exist_ok=True)
+        if self.tp_size > 1 and dist.is_initialized():
+            suffix = f"_rank{dist.get_rank()}"
+        else:
+            suffix = ""
         torch.save(
             {
                 "model": self.model.state_dict(),
@@ -149,6 +187,7 @@ class Trainer:
                 "step": self.global_step,
                 "config": self.cfg,
             },
-            ckpt_path / "pytorch_model.pt",
+            ckpt_path / f"pytorch_model{suffix}.pt",
         )
-        print(f"Saved checkpoint to {ckpt_path}")
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            print(f"Saved checkpoint to {ckpt_path}")
