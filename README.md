@@ -1,5 +1,9 @@
 # Yuntun
 
+<div align="center">
+  <img src="https://images.openai.com/static-rsc-3/mUmYOtSSgJMUZV_GHzMcb4_vBK_vxkF_ZrP-i8oj7xlY17QPzFY5y9P8EMMUuvP3wFgwnhYK_umVNPr4aaVwsuQIY5MjczAqE_kCzI04HeI?purpose=fullsize&v=1" width="280" alt="Yuntun mascot" />
+</div>
+
 A minimal, from-scratch implementation of the **Qwen3** causal language model architecture with pre-training support on the FineWeb dataset. Includes Megatron-style tensor parallelism for multi-GPU training.
 
 ## Features
