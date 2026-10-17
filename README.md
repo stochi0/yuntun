@@ -1,130 +1,91 @@
 # Yuntun
 
-<div align="center">
-  <img src="https://images.openai.com/static-rsc-3/mUmYOtSSgJMUZV_GHzMcb4_vBK_vxkF_ZrP-i8oj7xlY17QPzFY5y9P8EMMUuvP3wFgwnhYK_umVNPr4aaVwsuQIY5MjczAqE_kCzI04HeI?purpose=fullsize&v=1" width="280" alt="Yuntun mascot" />
-</div>
+A Qwen3-style causal language model implemented in PyTorch, with FineWeb
+streaming and Megatron-style tensor parallelism.
 
-A minimal, from-scratch implementation of the **Qwen3** causal language model architecture with pre-training support on the FineWeb dataset. Includes Megatron-style tensor parallelism for multi-GPU training.
+## What is included
 
-## Features
-
-- **Qwen3 architecture** — Decoder-only transformer with RoPE, GQA, RMSNorm, and QK-norm
-- **FineWeb pre-training** — Streaming data loading from HuggingFace FineWeb (sample-10BT)
-- **Tensor parallelism** — Megatron-style TP for embeddings, attention, MLP, and LM head
-- **HuggingFace compatible** — Load pretrained Qwen3 weights and verify architectural parity
-- **Config-driven training** — JSON config for model, data, and parallelism settings
-
-## Requirements
-
-- Python ≥ 3.13
-- PyTorch ≥ 2.10
-- CUDA (optional, for GPU training)
+- Decoder-only transformer layers with RoPE, grouped-query attention, RMSNorm,
+  and query/key normalization.
+- FineWeb data loading and configuration-driven pretraining.
+- Tensor-parallel embeddings, attention, MLPs, and language-model head.
+- Hugging Face weight loading and architecture comparison scripts.
 
 ## Installation
 
-This project uses [uv](https://docs.astral.sh/uv/) for dependency management:
+Use Python 3.13 or later and [uv](https://docs.astral.sh/uv/).
+The project requires PyTorch 2.10 or later; multi-GPU training requires CUDA.
 
-```bash
-# Clone and install
-git clone <repo-url>
+```sh
+git clone https://github.com/stochi0/yuntun.git
 cd yuntun
-uv sync
+uv sync --locked
 ```
 
-## Quick Start
-
-### Train on FineWeb (single GPU)
-
-```bash
-uv run python scripts/train.py --config configs/train.json
-```
-
-### Quick test (override max steps)
-
-```bash
-uv run python scripts/train.py --config configs/train.json --max-steps 100
-```
-
-### Tensor parallelism (multi-GPU)
-
-```bash
-python -m torch.distributed.run --nproc_per_node=2 scripts/train.py --config configs/train.json
-```
-
-Set `parallelism.tp_size` in your config to match `--nproc_per_node`.
-
-### Verify architecture parity with HuggingFace Qwen3
-
-```bash
-uv run python scripts/verify_architecture.py
-```
-
-Runs parameter equality, forward pass parity, random stress tests, and generation checks against `Qwen/Qwen3-0.6B`.
-
-## Project Structure
-
-```
-yuntun/
-├── configs/
-│   └── train.json          # Training config (model, data, parallelism)
-├── scripts/
-│   ├── train.py            # Training entrypoint
-│   └── verify_architecture.py  # HF parity verification
-├── src/yuntun/
-│   ├── model/              # Qwen3 model, layers, config
-│   ├── data/               # FineWeb data module
-│   ├── distributed/        # Tensor parallelism (TP)
-│   └── trainer.py          # Training loop
-└── tests/
-    └── test_tp.py          # TP smoke test
-```
-
-## Configuration
-
-Example `configs/train.json`:
-
-```json
-{
-  "dataset": "HuggingFaceFW/fineweb",
-  "dataset_config": "sample-10BT",
-  "tokenizer": "Qwen/Qwen3-0.6B",
-  "max_seq_length": 512,
-  "batch_size": 8,
-  "grad_accum_steps": 4,
-  "lr": 0.0003,
-  "weight_decay": 0.01,
-  "warmup_steps": 500,
-  "max_steps": 10000,
-  "eval_steps": 500,
-  "save_steps": 1000,
-  "output_dir": "outputs/fineweb",
-  "parallelism": {
-    "tp_size": 1,
-    "pp_size": 1,
-    "dp_size": 1
-  },
-  "model": {
-    "vocab_size": 151936,
-    "hidden_size": 1024,
-    "intermediate_size": 3072,
-    "num_hidden_layers": 28,
-    "num_attention_heads": 16,
-    "num_key_value_heads": 8,
-    "max_position_embeddings": 40960
-  }
-}
-```
-
-## API
+## Build a model
 
 ```python
-from yuntun import Qwen3Config, Qwen3Model, Qwen3ForCausalLM
+import torch
+from yuntun import Qwen3Config, Qwen3ForCausalLM
 
 config = Qwen3Config(
-    vocab_size=151936,
-    hidden_size=1024,
-    num_hidden_layers=28,
-    # ...
+    vocab_size=256,
+    hidden_size=64,
+    intermediate_size=128,
+    num_hidden_layers=2,
+    num_attention_heads=4,
+    num_key_value_heads=2,
 )
 model = Qwen3ForCausalLM(config)
 ```
+
+This constructs a small random model without downloading pretrained weights.
+See [the model implementation](src/yuntun/model/model.py) for its forward API.
+
+## Training
+
+The training entrypoint reads [configs/train.json](configs/train.json). It uses
+FineWeb's `sample-10BT` configuration and a Qwen tokenizer from Hugging Face,
+so a training run can download data and model assets.
+
+```sh
+uv run python scripts/train.py --config configs/train.json --max-steps 100
+```
+
+For two-way tensor parallelism, set `parallelism.tp_size` to `2` in the config
+and launch two processes:
+
+```sh
+uv run python -m torch.distributed.run --nproc_per_node=2 \
+  scripts/train.py --config configs/train.json
+```
+
+The process count must match the tensor-parallel configuration. The config also
+contains model dimensions, sequence length, batch size, learning rate, and output
+directory. Start with a model and batch size that fit the available device.
+
+## Architecture checks
+
+```sh
+uv run python scripts/verify_architecture.py
+```
+
+This downloads `Qwen/Qwen3-0.6B` and compares parameters, forward outputs, and
+generation behavior against the Hugging Face implementation. The checks are
+architecture comparisons, not a claim about pretrained model quality or
+training throughput.
+
+The [tensor-parallel smoke check](tests/test_tp.py) covers the distributed path.
+
+## Repository guide
+
+| Location | Contents |
+| --- | --- |
+| [src/yuntun/model/](src/yuntun/model/) | Configuration, layers, model, and weight loading |
+| [src/yuntun/data/](src/yuntun/data/) | FineWeb streaming |
+| [src/yuntun/distributed/](src/yuntun/distributed/) | Parallel context and tensor-parallel operations |
+| [src/yuntun/trainer.py](src/yuntun/trainer.py) | Training loop |
+| [scripts/](scripts/) | Training and architecture-check entrypoints |
+
+Reference implementation and pretrained weights:
+[Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B).
