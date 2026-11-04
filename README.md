@@ -89,5 +89,3 @@ The [tensor-parallel smoke check](tests/test_tp.py) covers the distributed path.
 
 Reference implementation and pretrained weights:
 [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B).
-
-[Citation guide](CITATION.md) · [BibTeX](CITATION.bib)
