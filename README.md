@@ -3,14 +3,6 @@
 A Qwen3-style causal language model implemented in PyTorch, with FineWeb
 streaming and Megatron-style tensor parallelism.
 
-## What is included
-
-- Decoder-only transformer layers with RoPE, grouped-query attention, RMSNorm,
-  and query/key normalization.
-- FineWeb data loading and configuration-driven pretraining.
-- Tensor-parallel embeddings, attention, MLPs, and language-model head.
-- Hugging Face weight loading and architecture comparison scripts.
-
 ## Installation
 
 Use Python 3.13 or later and [uv](https://docs.astral.sh/uv/).
@@ -71,21 +63,9 @@ uv run python scripts/verify_architecture.py
 ```
 
 This downloads `Qwen/Qwen3-0.6B` and compares parameters, forward outputs, and
-generation behavior against the Hugging Face implementation. The checks are
-architecture comparisons, not a claim about pretrained model quality or
-training throughput.
+generation behavior against the Hugging Face implementation. These compare the architecture, not training quality or throughput.
 
 The [tensor-parallel smoke check](tests/test_tp.py) covers the distributed path.
-
-## Repository guide
-
-| Location | Contents |
-| --- | --- |
-| [src/yuntun/model/](src/yuntun/model/) | Configuration, layers, model, and weight loading |
-| [src/yuntun/data/](src/yuntun/data/) | FineWeb streaming |
-| [src/yuntun/distributed/](src/yuntun/distributed/) | Parallel context and tensor-parallel operations |
-| [src/yuntun/trainer.py](src/yuntun/trainer.py) | Training loop |
-| [scripts/](scripts/) | Training and architecture-check entrypoints |
 
 Reference implementation and pretrained weights:
 [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B).
